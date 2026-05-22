@@ -5,10 +5,29 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
-from src.agent import AgentRegistry, AgentStatus
+from src.agent import AgentRegistry
+from src.agent.registry import AgentStatus
 from src.orchestrator.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
+
+
+# --- Exception Sanitizer (Issue #1953) ---
+
+ALLOWED_TASK_FIELDS = frozenset({"id", "target_agent", "type", "priority", "retries", "enqueued_at"})
+
+
+def sanitize_task_for_exception(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip raw payload fields from task context before passing to error hooks.
+
+    Only stable structural fields (task ID, agent ID, type, priority) are
+    forwarded.  Raw payload data and local variables are dropped so that
+    third-party error pipelines cannot retain sensitive task content.
+    """
+    return {k: v for k, v in task.items() if k in ALLOWED_TASK_FIELDS}
+
+
+# --- /Exception Sanitizer ---
 
 
 class OrchestrationEngine:
@@ -69,8 +88,10 @@ class OrchestrationEngine:
 
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
+            # Pass only sanitized task context — never raw payloads
+            safe_task = sanitize_task_for_exception(task)
             for hook in self._hooks["on_error"]:
-                await hook(task, e)
+                await hook(safe_task, e)
 
     async def _run_agent_task(self, agent: Dict, task: Dict) -> Any:
         loop = asyncio.get_event_loop()
@@ -185,3 +206,5 @@ class OrchestrationEngine:
 # 2026-02-16T17:12:09 update
 
 # 2026-03-12T11:33:28 update
+
+# 2026-05-22: fix — sanitize task context before passing to on_error hooks (Issue #1953)
